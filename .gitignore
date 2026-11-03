@@ -14,4 +14,4 @@ data/manifests/*
 !data/manifests/.gitkeep
 experiments/
 
-.env.example
+!.env.example
