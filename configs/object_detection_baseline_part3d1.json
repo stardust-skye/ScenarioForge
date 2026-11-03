@@ -1,0 +1,30 @@
+{
+  "dataset_root": "data/downloaded-dataset",
+  "vision_dir": "data/processed/vision",
+  "split_manifest": "data/processed/vision/splits/scene_split_seed42.json",
+  "output_dir": "experiments",
+  "training_sample_tokens_file": null,
+  "training_sample_limit": null,
+  "validation_sample_limit": null,
+  "image_size": null,
+  "batch_size": 1,
+  "num_workers": 0,
+  "seed": 42,
+  "epochs": 3,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "gradient_accumulation_steps": 1,
+  "gradient_clip_norm": 1.0,
+  "mixed_precision": true,
+  "reproducibility_mode": "best_effort",
+  "validation_interval": 1,
+  "early_stopping_patience": null,
+  "scheduler_step_size": 3,
+  "scheduler_gamma": 0.1,
+  "device": "cuda",
+  "model": {
+    "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+    "pretrained_weights": "COCO_V1",
+    "freeze_backbone_epochs": 0
+  }
+}

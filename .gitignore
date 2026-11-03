@@ -1,0 +1,15 @@
+.venv/
+.venv-ml/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.env
+data/raw/**/*
+!data/raw/.gitkeep
+data/downloaded-dataset/
+data/processed/*
+!data/processed/.gitkeep
+data/manifests/*
+!data/manifests/.gitkeep
+experiments/

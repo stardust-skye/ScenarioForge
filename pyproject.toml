@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scenarioforge"
+version = "0.1.0"
+description = "A modular foundation for multimodal autonomous-driving dataset intelligence"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "nuscenes-devkit>=1.1.11",
+    "pydantic>=2.7",
+    "SQLAlchemy>=2.0",
+    "python-dotenv>=1.0",
+    "numpy>=1.26,<2",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+notebooks = ["jupyter>=1.0", "ipykernel>=6.29", "nbclient>=0.10", "nbformat>=5.10"]
+postgres = ["psycopg[binary]>=3.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

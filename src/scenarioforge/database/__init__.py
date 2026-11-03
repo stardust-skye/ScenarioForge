@@ -1,0 +1,1 @@
+"""Relational metadata persistence."""

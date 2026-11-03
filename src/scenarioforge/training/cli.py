@@ -1,0 +1,93 @@
+"""Command-line entry points for object-detection experiments."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Sequence
+
+import torch
+
+from scenarioforge.training.experiment import DetectionExperiment
+from scenarioforge.training.seed import environment_metadata
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="train_detection",
+        description="Train and evaluate ScenarioForge object detectors.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("inspect-environment", help="Report Python, PyTorch, and device details")
+    for name, description in (
+        ("create-model", "Construct a configured detector"),
+        ("smoke-test", "Run one real forward/backward step and checkpoint round-trip"),
+        ("train", "Run training with validation-only model selection"),
+    ):
+        command = commands.add_parser(name, help=description)
+        command.add_argument("--config", type=Path, required=True)
+    resume = commands.add_parser("resume", help="Resume an existing experiment")
+    resume.add_argument("--experiment-dir", type=Path, required=True)
+    resume.add_argument("--checkpoint", type=Path)
+    evaluate = commands.add_parser("evaluate", help="Evaluate a saved checkpoint")
+    evaluate.add_argument("--experiment-dir", type=Path, required=True)
+    evaluate.add_argument("--checkpoint", type=Path, required=True)
+    evaluate.add_argument("--split", choices=("validation", "test"), default="validation")
+    evaluate.add_argument(
+        "--test-authorization",
+        type=Path,
+        help="Auditable JSON authorization required when --split=test",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "inspect-environment":
+        print(json.dumps(environment_metadata(
+            torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        ), indent=2, sort_keys=True))
+        return 0
+    if args.command in ("create-model", "smoke-test", "train"):
+        experiment = DetectionExperiment.from_config_file(args.config)
+        if args.command == "create-model":
+            model = experiment.create_model()
+            parameters = list(model.parameters())
+            print(json.dumps({
+                "architecture": model.architecture,
+                "pretrained_weights": model.pretrained_weights,
+                "foreground_class_count": len(model.model_label_to_source_id),
+                "output_class_count_including_background": (
+                    model.detector.roi_heads.box_predictor.cls_score.out_features
+                ),
+                "parameters": sum(parameter.numel() for parameter in parameters),
+                "trainable_parameters": sum(
+                    parameter.numel() for parameter in parameters if parameter.requires_grad
+                ),
+                "device": str(experiment.device),
+            }, indent=2))
+        elif args.command == "smoke-test":
+            print(json.dumps(experiment.run_one_batch_smoke_test(), indent=2, sort_keys=True))
+        else:
+            history = experiment.train()
+            print(f"Completed {len(history)} epochs in {experiment.run_dir}")
+        return 0
+    if args.command == "resume":
+        experiment = DetectionExperiment.from_experiment_dir(args.experiment_dir)
+        checkpoint = args.checkpoint or experiment.run_dir / "checkpoint_last.pth"
+        history = experiment.train(resume_from=checkpoint)
+        print(f"Resumed through epoch {history[-1]['epoch']} in {experiment.run_dir}")
+        return 0
+    experiment = DetectionExperiment.from_experiment_dir(args.experiment_dir)
+    metrics = experiment.evaluate_checkpoint(
+        args.checkpoint,
+        split_name=args.split,
+        test_authorization=args.test_authorization,
+    )
+    print(json.dumps(metrics, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

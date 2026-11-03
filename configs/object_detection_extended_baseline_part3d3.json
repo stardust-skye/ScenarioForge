@@ -1,0 +1,30 @@
+{
+  "batch_size": 1,
+  "dataset_root": "data\\downloaded-dataset",
+  "device": "cuda",
+  "early_stopping_patience": null,
+  "epochs": 6,
+  "gradient_accumulation_steps": 1,
+  "gradient_clip_norm": 1.0,
+  "image_size": null,
+  "learning_rate": 0.0001,
+  "mixed_precision": true,
+  "model": {
+    "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+    "freeze_backbone_epochs": 0,
+    "pretrained_weights": "COCO_V1"
+  },
+  "num_workers": 0,
+  "output_dir": "experiments",
+  "reproducibility_mode": "best_effort",
+  "scheduler_gamma": 0.1,
+  "scheduler_step_size": 3,
+  "seed": 42,
+  "split_manifest": "data\\processed\\vision\\splits\\scene_split_seed42.json",
+  "training_sample_limit": null,
+  "training_sample_tokens_file": null,
+  "validation_interval": 1,
+  "validation_sample_limit": null,
+  "vision_dir": "data\\processed\\vision",
+  "weight_decay": 0.0001
+}
