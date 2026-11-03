@@ -13,3 +13,5 @@ data/processed/*
 data/manifests/*
 !data/manifests/.gitkeep
 experiments/
+
+.env.example
