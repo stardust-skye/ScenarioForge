@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model-training seed; defaults to --selection-seed for the approved design",
     )
     pilot.add_argument(
+        "--strategy-order",
+        nargs=4,
+        choices=("random", "frequency", "diversity", "weighted_interest"),
+        help="Optional serial order containing each approved strategy once",
+    )
+    pilot.add_argument(
         "--output-root",
         type=Path,
         default=Path("experiments/part3f4_curation_pilots"),
@@ -115,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             report_path=args.report_path,
             selection_seed=args.selection_seed,
             training_seed=args.training_seed,
+            strategy_order=tuple(args.strategy_order) if args.strategy_order else None,
         )
         print(f"Completed Part 3F.4 curation pilot in {run_root}")
         return 0

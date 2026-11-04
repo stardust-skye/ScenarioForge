@@ -231,6 +231,7 @@ def run_curation_pilot(
     report_path: Path | None = None,
     selection_seed: int = PILOT_SEED,
     training_seed: int | None = None,
+    strategy_order: tuple[str, ...] | None = None,
     repository_root: Path | None = None,
 ) -> Path:
     """Validate seed-specific curation inputs, then run each experiment sequentially."""
@@ -245,6 +246,7 @@ def run_curation_pilot(
         raise ValueError(
             "The approved seed-block design requires training_seed to equal selection_seed"
         )
+    strategy_order = _validate_strategy_order(strategy_order)
     if curation_dir is None:
         if selection_seed != PILOT_SEED:
             raise ValueError(
@@ -300,7 +302,7 @@ def run_curation_pilot(
     experiments: list[tuple[str, DetectionExperiment, dict[str, Any]]] = []
     validation_tokens: tuple[str, ...] | None = None
 
-    for strategy in AUDITED_CHILD_SHA256:
+    for strategy in strategy_order:
         condition = curation["conditions"][strategy]
         run_dir = run_root / _condition_slug(strategy)
         run_dir.mkdir(exist_ok=False)
@@ -952,6 +954,19 @@ def _canonical_manifest_digest(manifest: dict[str, Any]) -> str:
         ensure_ascii=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_strategy_order(strategy_order: tuple[str, ...] | None) -> tuple[str, ...]:
+    strategies = tuple(AUDITED_CHILD_SHA256)
+    if strategy_order is None:
+        return strategies
+    requested = tuple(strategy_order)
+    if len(requested) != len(strategies) or set(requested) != set(strategies):
+        raise ValueError(
+            "strategy_order must contain each approved strategy exactly once: "
+            + ", ".join(strategies)
+        )
+    return requested
 
 
 def _token_digest(tokens: tuple[str, ...]) -> str:
