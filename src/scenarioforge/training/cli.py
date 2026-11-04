@@ -39,6 +39,33 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Auditable JSON authorization required when --split=test",
     )
+    pilot = commands.add_parser(
+        "curation-pilot",
+        help="Preflight and sequentially run the audited Part 3F.4 curation pilot",
+    )
+    pilot.add_argument(
+        "--baseline-config",
+        type=Path,
+        default=Path("configs/object_detection_extended_baseline_part3d3.json"),
+    )
+    pilot.add_argument(
+        "--curation-dir",
+        type=Path,
+        default=Path(
+            "data/processed/curation_experiments/"
+            "curation_20261103T205532Z_77d0c39b"
+        ),
+    )
+    pilot.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("experiments/part3f4_curation_pilots"),
+    )
+    pilot.add_argument(
+        "--report-path",
+        type=Path,
+        default=Path("docs/PART_3F_4_CONTROLLED_PILOT_REPORT.md"),
+    )
     return parser
 
 
@@ -48,6 +75,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(environment_metadata(
             torch.device("cuda" if torch.cuda.is_available() else "cpu")
         ), indent=2, sort_keys=True))
+        return 0
+    if args.command == "curation-pilot":
+        from scenarioforge.training.curation_pilot import run_curation_pilot
+
+        run_root = run_curation_pilot(
+            baseline_config_path=args.baseline_config,
+            curation_dir=args.curation_dir,
+            output_root=args.output_root,
+            report_path=args.report_path,
+        )
+        print(f"Completed Part 3F.4 curation pilot in {run_root}")
         return 0
     if args.command in ("create-model", "smoke-test", "train"):
         experiment = DetectionExperiment.from_config_file(args.config)

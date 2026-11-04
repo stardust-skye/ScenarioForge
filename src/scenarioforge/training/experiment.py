@@ -137,6 +137,14 @@ class DetectionExperiment:
             "seed": config.seed,
             "reproducibility_mode": config.reproducibility_mode,
         }
+        if config.curation_provenance is not None:
+            self.metadata["curation_provenance"] = json.loads(
+                json.dumps(config.curation_provenance)
+            )
+        if config.pretrained_checkpoint_provenance is not None:
+            self.metadata["pretrained_checkpoint_provenance"] = json.loads(
+                json.dumps(config.pretrained_checkpoint_provenance)
+            )
         runtime_environment = environment_metadata(self.device)
         self.metadata["runtime_environment"] = runtime_environment
         config_json = json.dumps(
@@ -157,6 +165,9 @@ class DetectionExperiment:
                 "runtime_environment",
             )
         }
+        for key in ("curation_provenance", "pretrained_checkpoint_provenance"):
+            if key in self.metadata:
+                provenance[key] = self.metadata[key]
         self.metadata["provenance_digest"] = hashlib.sha256(
             json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

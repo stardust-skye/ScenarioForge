@@ -38,6 +38,8 @@ class ExperimentConfig:
     batch_size: int = 1
     num_workers: int = 0
     seed: int = 42
+    selection_seed: int | None = None
+    training_seed: int | None = None
     epochs: int = 1
     learning_rate: float = 0.0001
     weight_decay: float = 0.0001
@@ -50,11 +52,21 @@ class ExperimentConfig:
     scheduler_step_size: int = 3
     scheduler_gamma: float = 0.1
     device: str = "auto"
+    curation_provenance: dict[str, Any] | None = None
+    pretrained_checkpoint_provenance: dict[str, Any] | None = None
     model: ModelConfig = field(default_factory=ModelConfig)
 
     def __post_init__(self) -> None:
         for field_name in ("dataset_root", "vision_dir", "split_manifest", "output_dir"):
             object.__setattr__(self, field_name, Path(getattr(self, field_name)))
+        for field_name in ("selection_seed", "training_seed"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, int) or value < 0):
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.training_seed is not None and self.training_seed != self.seed:
+            if self.seed != 42:
+                raise ValueError("seed and training_seed must match when both are specified")
+            object.__setattr__(self, "seed", self.training_seed)
         if self.training_sample_tokens_file is not None:
             object.__setattr__(
                 self, "training_sample_tokens_file", Path(self.training_sample_tokens_file)
@@ -87,11 +99,27 @@ class ExperimentConfig:
             raise ValueError("device must be 'auto', 'cpu', or 'cuda'")
         if self.reproducibility_mode not in ("strict", "best_effort"):
             raise ValueError("reproducibility_mode must be 'strict' or 'best_effort'")
+        for field_name in (
+            "curation_provenance",
+            "pretrained_checkpoint_provenance",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                if not isinstance(value, dict):
+                    raise ValueError(f"{field_name} must be a JSON object or null")
+                try:
+                    json.dumps(value, sort_keys=True)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{field_name} must contain JSON-serializable values") from exc
         if not isinstance(self.model, ModelConfig):
             object.__setattr__(self, "model", ModelConfig(**self.model))
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        if self.selection_seed is None:
+            payload.pop("selection_seed")
+        if self.training_seed is None:
+            payload.pop("training_seed")
         for key in ("dataset_root", "vision_dir", "split_manifest", "output_dir"):
             payload[key] = str(payload[key])
         if payload["training_sample_tokens_file"] is not None:

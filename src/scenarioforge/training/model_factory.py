@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -132,6 +134,45 @@ def create_detection_model(
     )
     validate_model_class_count(adapter, len(labels))
     return adapter
+
+
+def pretrained_checkpoint_provenance(config: ModelConfig) -> dict[str, str] | None:
+    """Identify a cached Torchvision checkpoint without triggering a download."""
+    if config.pretrained_weights is None:
+        return None
+    if config.pretrained_weights != "COCO_V1":
+        raise ValueError(f"Unsupported pretrained weights: {config.pretrained_weights}")
+
+    from torchvision.models.detection import (
+        FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
+    )
+
+    weights = FasterRCNN_MobileNet_V3_Large_320_FPN_Weights.COCO_V1
+    filename = Path(weights.url).name
+    checkpoint_path = Path(torch.hub.get_dir()) / "checkpoints" / filename
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Required pretrained checkpoint is not cached; refusing an implicit download: "
+            f"{checkpoint_path}"
+        )
+    digest = hashlib.sha256()
+    with checkpoint_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+    expected_prefix = filename.rsplit("-", 1)[-1].removesuffix(".pth")
+    if not sha256.startswith(expected_prefix):
+        raise ValueError(
+            f"Cached pretrained checkpoint hash does not match the Torchvision URL: "
+            f"{checkpoint_path}"
+        )
+    return {
+        "identifier": "FasterRCNN_MobileNet_V3_Large_320_FPN_Weights.COCO_V1",
+        "url": weights.url,
+        "filename": filename,
+        "cache_path": str(checkpoint_path.resolve()),
+        "sha256": sha256,
+    }
 
 
 def validate_model_class_count(model: FasterRCNNAdapter, foreground_classes: int) -> None:

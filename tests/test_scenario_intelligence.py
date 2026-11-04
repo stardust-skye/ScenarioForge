@@ -14,7 +14,11 @@ import pytest
 from scenarioforge.scenario_intelligence import reporting as rep
 from scenarioforge.scenario_intelligence.cli import main
 from scenarioforge.scenario_intelligence.config import ScenarioIntelligenceConfig
-from scenarioforge.scenario_intelligence.curation_engine import CurationConfig, curate
+from scenarioforge.scenario_intelligence.curation_engine import (
+    CurationConfig,
+    curate,
+    export_curation,
+)
 from scenarioforge.scenario_intelligence.diversity_analyzer import analyze_diversity
 from scenarioforge.scenario_intelligence.duplicate_detector import (
     DuplicateConfig,
@@ -454,13 +458,25 @@ def test_cli_missing_input_returns_usage_error(tmp_path):
 
 def test_cli_analysis_pipeline_on_synthetic_file(tmp_path):
     rep.save_scenarios(_records(), tmp_path / rep.SCENARIO_FILE, "synthetic")
-    for command in (["stats"], ["rarity"], ["diversity"], ["duplicates"], ["rank"],
-                    ["curate", "--strategy", "diversity", "--n", "3"]):
+    for command in (["stats"], ["rarity"], ["diversity"], ["duplicates"], ["rank"]):
         assert main(["--output-dir", str(tmp_path), "--no-plots", *command]) == 0, command
+    result = _curate("diversity", n=3, seed=0)
     manifest = tmp_path / "curation_diversity_n3_seed0_manifest.json"
-    assert main(["--output-dir", str(tmp_path), "--no-plots", "compare", "--manifest", str(manifest)]) == 0
+    export_curation(result, manifest, tmp_path / "curation_diversity_n3_seed0_selected.csv")
+    assert main([
+        "--output-dir", str(tmp_path), "--no-plots", "compare",
+        "--manifest", str(manifest),
+    ]) == 0
     report = json.loads((tmp_path / "comparison_curation_diversity_n3_seed0.json").read_text())
     assert not math.isnan(report["category_jsd_bits"])
+
+
+def test_cli_blocks_unrestricted_training_curation(tmp_path):
+    rep.save_scenarios(_records(), tmp_path / rep.SCENARIO_FILE, "synthetic")
+    assert main([
+        "--output-dir", str(tmp_path), "--no-plots", "curate",
+        "--strategy", "diversity", "--n", "3",
+    ]) == 2
 
 
 def test_cli_duplicate_filters_expose_pair_classes(tmp_path):

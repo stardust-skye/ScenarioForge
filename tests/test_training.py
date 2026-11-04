@@ -132,7 +132,12 @@ def _batch():
 
 
 def test_config_round_trip_and_validation(tmp_path):
-    config = _config(tmp_path, image_size=(320, 640))
+    config = _config(
+        tmp_path,
+        image_size=(320, 640),
+        curation_provenance={"child_manifest_sha256": "a" * 64},
+        pretrained_checkpoint_provenance={"sha256": "b" * 64},
+    )
     path = config.write_json(tmp_path / "config.json")
     loaded = ExperimentConfig.from_json(path)
     assert loaded.to_dict() == config.to_dict()
@@ -680,6 +685,14 @@ def test_experiment_records_split_inventory_and_selection_digests(tmp_path):
         model=ModelConfig(pretrained_weights=None),
         device="cpu",
         reproducibility_mode="best_effort",
+        curation_provenance={
+            "child_manifest_sha256": "a" * 64,
+            "run_manifest_sha256": "c" * 64,
+        },
+        pretrained_checkpoint_provenance={
+            "identifier": "test-checkpoint",
+            "sha256": "b" * 64,
+        },
     ))
     saved_environment = json.loads(
         (experiment.run_dir / "environment.json").read_text(encoding="utf-8")
@@ -695,6 +708,11 @@ def test_experiment_records_split_inventory_and_selection_digests(tmp_path):
     assert deterministic_settings["warn_only"] is True
     assert "cudnn_version" in saved_environment["hardware"]
     assert saved_environment["reproducibility_mode"] == "best_effort"
+    assert saved_environment["curation_provenance"] == experiment.config.curation_provenance
+    assert (
+        saved_environment["pretrained_checkpoint_provenance"]
+        == experiment.config.pretrained_checkpoint_provenance
+    )
     assert saved_environment["runtime_environment"]["packages"]["torch"] == torch.__version__
 
 

@@ -21,9 +21,6 @@ from scenarioforge.scenario_intelligence import reporting as rep
 from scenarioforge.scenario_intelligence.config import ScenarioIntelligenceConfig, default_output_dir
 from scenarioforge.scenario_intelligence.curation_engine import (
     STRATEGIES,
-    CurationConfig,
-    curate,
-    export_curation,
     input_digest,
 )
 from scenarioforge.scenario_intelligence.diversity_analyzer import analyze_diversity
@@ -72,7 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Feature to favour (requires --weight preference=VALUE)")
     rank.add_argument("--top", type=int, default=20, help="Rows to plot (default 20)")
 
-    cur = sub.add_parser("curate", help="Create a curated subset and manifest")
+    cur = sub.add_parser(
+        "curate",
+        help="Disabled for training subsets; use curate-experiment for split-safe generation",
+    )
     cur.add_argument("--strategy", required=True, choices=STRATEGIES)
     cur.add_argument("--n", type=int, required=True, help="Requested number of samples")
     cur.add_argument("--seed", type=int, default=0)
@@ -82,6 +82,21 @@ def build_parser() -> argparse.ArgumentParser:
     cur.add_argument("--max-similarity", type=float, help="Skip candidates at/above this similarity to a selected sample")
     cur.add_argument("--weight", action="append", default=[], metavar="COMPONENT=VALUE")
     cur.add_argument("--prefer", action="append", default=[], metavar="FEATURE=WEIGHT")
+
+    experiment_curate = sub.add_parser(
+        "curate-experiment",
+        help="Create train-only, scene-balanced experiment subsets with provenance",
+    )
+    experiment_curate.add_argument("--scenario-file", type=Path)
+    experiment_curate.add_argument("--vision-dir", type=Path)
+    experiment_curate.add_argument("--split-manifest", type=Path)
+    experiment_curate.add_argument("--dataset-root", type=Path)
+    experiment_curate.add_argument(
+        "--output-root",
+        type=Path,
+        help="Parent for a new immutable run directory (default: data/processed/curation_experiments)",
+    )
+    experiment_curate.add_argument("--seed", type=int, default=42)
 
     cmp_ = sub.add_parser("compare", help="Compare original vs curated distributions from a manifest")
     cmp_.add_argument("--manifest", type=Path, required=True)
@@ -132,6 +147,37 @@ def run(args: argparse.Namespace) -> int:
     config = ScenarioIntelligenceConfig.from_file(args.config) if args.config else ScenarioIntelligenceConfig()
     plots = out / "plots"
     cmd = args.command
+
+    if cmd == "curate-experiment":
+        from scenarioforge.scenario_intelligence.experiment_curation import (
+            create_experiment_subsets,
+        )
+
+        vision_dir = args.vision_dir or settings.project_root / "data" / "processed" / "vision"
+        scenario_file = args.scenario_file or out / rep.SCENARIO_FILE
+        split_manifest = args.split_manifest or vision_dir / "splits" / "scene_split_seed42.json"
+        dataset_root = args.dataset_root or settings.project_root / "data" / "downloaded-dataset"
+        output_root = (
+            args.output_root
+            or settings.project_root / "data" / "processed" / "curation_experiments"
+        )
+        run_dir = create_experiment_subsets(
+            scenario_path=scenario_file,
+            vision_dir=vision_dir,
+            split_manifest_path=split_manifest,
+            dataset_root=dataset_root,
+            output_root=output_root,
+            seed=args.seed,
+        )
+        logger.info("Created immutable train-only curation subsets in %s", run_dir)
+        return 0
+
+    if cmd == "curate":
+        raise ValueError(
+            "The unrestricted 'curate' command is disabled for training data because it "
+            "scores all scenario records. Use 'curate-experiment' with the authoritative "
+            "seed-42 split to generate leakage-safe training subsets."
+        )
 
     if cmd == "extract":
         from scenarioforge.database.connection import create_database_engine, create_session_factory
@@ -246,24 +292,6 @@ def run(args: argparse.Namespace) -> int:
                     [[r["rank"], r["sample_id"], r["scene_id"], r["scenario_interest_score"]] + [r["components"][c] for c in ("rarity", "composition_diversity", "complexity", "preference")] for r in rows])
         if not args.no_plots:
             rep.plot_stacked_ranking(rows, "Top scenarios by scenario-interest score", plots / "scenario_ranking.png", args.top)
-        return 0
-
-    if cmd == "curate":
-        rarity = analyze_rarity(records, config.rarity)
-        similarity = compute_similarity(records, config.duplicates)
-        curation = CurationConfig(
-            strategy=args.strategy, n_samples=args.n, seed=args.seed,
-            require_groups=tuple(args.require_group),
-            min_features=_pairs(args.min_features, "--min"), max_features=_pairs(args.max_features, "--max"),
-            max_near_duplicate_similarity=args.max_similarity,
-            ranking=_ranking_config(config.ranking, args.weight, args.prefer),
-        )
-        result = curate(records, curation, dataset_source_id=dataset_id, rarity=rarity, similarity=similarity)
-        stem = f"curation_{args.strategy}_n{args.n}_seed{args.seed}"
-        export_curation(result, out / f"{stem}_manifest.json", out / f"{stem}_selected.csv")
-        if result.shortfall_reason:
-            logger.warning("%s", result.shortfall_reason)
-        logger.info("Selected %d of %d scenarios (%s)", len(result.selected), result.n_input, stem)
         return 0
 
     if cmd == "compare":
