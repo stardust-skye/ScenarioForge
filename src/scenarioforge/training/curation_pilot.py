@@ -25,11 +25,16 @@ from scenarioforge.training.model_factory import (
     pretrained_checkpoint_provenance,
 )
 from scenarioforge.training.seed import initialize_seed
+from scenarioforge.scenario_intelligence.experiment_curation import (
+    balanced_scene_quotas,
+)
+from scenarioforge.vision_data.dataloader import make_split_datasets, select_training_subset
 from scenarioforge.vision_data.dataset import load_dataset_version
 from scenarioforge.vision_data.splits import (
     load_split_manifest,
     validate_training_selection,
 )
+from scenarioforge.vision_data.transforms import build_eval_transforms
 
 AUDITED_RUN_SHA256 = "b7fa8bc6276c626b7a03cc180e1988403dcc8b5b7b091a54495fb07bd92e217d"
 AUDITED_CHILD_SHA256 = {
@@ -47,19 +52,205 @@ CONDITION_NAMES = {
 SCENE_QUOTA_POLICY = "balanced_capacity_aware_equalization_v1"
 PILOT_BUDGET = 60
 PILOT_SEED = 42
+APPROVED_SEEDS = (42, 123, 2027, 31415, 271828)
+AUDITED_CURATION_DIR = Path(
+    "data/processed/curation_experiments/curation_20261103T205532Z_77d0c39b"
+)
+
+
+def preflight_curation_pilot(
+    *,
+    baseline_config_path: Path,
+    curation_dir: Path,
+    selection_seed: int,
+    training_seed: int | None = None,
+    repository_root: Path | None = None,
+) -> dict[str, Any]:
+    """Validate a seed block without creating experiment outputs or a model."""
+    root = Path(repository_root or Path(__file__).resolve().parents[3]).resolve()
+    if selection_seed not in APPROVED_SEEDS:
+        raise ValueError(f"selection_seed must be one of {APPROVED_SEEDS}")
+    training_seed = selection_seed if training_seed is None else training_seed
+    if training_seed not in APPROVED_SEEDS:
+        raise ValueError(f"training_seed must be one of {APPROVED_SEEDS}")
+    if training_seed != selection_seed:
+        raise ValueError(
+            "The approved seed-block design requires training_seed to equal selection_seed"
+        )
+
+    baseline_path = _resolve_from_root(baseline_config_path, root)
+    baseline = ExperimentConfig.from_json(baseline_path)
+    baseline = replace(
+        baseline,
+        dataset_root=_resolve_from_root(baseline.dataset_root, root),
+        vision_dir=_resolve_from_root(baseline.vision_dir, root),
+        split_manifest=_resolve_from_root(baseline.split_manifest, root),
+        seed=training_seed,
+        selection_seed=selection_seed,
+        training_seed=training_seed,
+    )
+    _validate_baseline_config(baseline, training_seed=training_seed)
+    curation_path = Path(curation_dir)
+    if not curation_path.is_absolute():
+        curation_path = root / curation_path
+    curation_path = curation_path.resolve()
+    curation = _validate_curation_inputs(
+        curation_dir=curation_path,
+        config=baseline,
+        repository_root=root,
+        selection_seed=selection_seed,
+    )
+    checkpoint_provenance = pretrained_checkpoint_provenance(baseline.model)
+    if checkpoint_provenance is None:
+        raise ValueError("The pilot requires the pretrained COCO_V1 checkpoint")
+
+    split_manifest = load_split_manifest(
+        baseline.split_manifest,
+        image_rows=_read_csv(baseline.vision_dir / "image_manifest.csv"),
+        dataset_version=load_dataset_version(
+            baseline.vision_dir / "dataset_manifest.json"
+        ),
+    )
+    validation_tokens = tuple(split_manifest["sample_tokens"]["validation"])
+    condition_results: list[dict[str, Any]] = []
+    validation_tokens_by_strategy: dict[str, tuple[str, ...]] = {}
+    evaluation_transform = build_eval_transforms(baseline.image_size)
+    initial_model_fingerprint: str | None = None
+
+    for strategy in AUDITED_CHILD_SHA256:
+        condition = curation["conditions"][strategy]
+        datasets = make_split_datasets(
+            dataset_root=str(baseline.dataset_root),
+            annotations_csv=str(baseline.vision_dir / "annotations.csv"),
+            image_manifest_csv=str(baseline.vision_dir / "image_manifest.csv"),
+            category_mapping_json=str(baseline.vision_dir / "category_mapping.json"),
+            split_manifest=split_manifest,
+            transforms={
+                "train": evaluation_transform,
+                "validation": evaluation_transform,
+            },
+            splits=("train", "validation"),
+        )
+        if set(datasets) != {"train", "validation"}:
+            raise ValueError("Preflight must instantiate train and validation datasets only")
+        train_dataset = select_training_subset(
+            datasets["train"],
+            split_manifest,
+            condition["selected_sample_tokens"],
+            image_rows=_read_csv(baseline.vision_dir / "image_manifest.csv"),
+        )
+        loaded_tokens = tuple(
+            train_dataset.dataset.sample_tokens[index]
+            for index in train_dataset.indices
+        )
+        if loaded_tokens != tuple(condition["selected_sample_tokens"]):
+            raise ValueError(f"{strategy} dataset order differs from its manifest")
+        if len(loaded_tokens) != PILOT_BUDGET or len(set(loaded_tokens)) != PILOT_BUDGET:
+            raise ValueError(f"{strategy} did not load exactly 60 unique training samples")
+        actual_validation_tokens = tuple(datasets["validation"].sample_tokens)
+        if len(actual_validation_tokens) != 80 or set(actual_validation_tokens) != set(
+            validation_tokens
+        ):
+            raise ValueError(f"{strategy} does not load the fixed 80-image validation split")
+        validation_tokens_by_strategy[strategy] = actual_validation_tokens
+
+        loaded_annotation_counts: dict[str, int] = {}
+        for index, token in enumerate(loaded_tokens):
+            _, target = train_dataset[index]
+            box_count = int(target["boxes"].shape[0])
+            if box_count != condition["annotation_counts"][token]:
+                raise ValueError(
+                    f"{strategy} sample {token} loaded {box_count} boxes; "
+                    f"manifest records {condition['annotation_counts'][token]}"
+                )
+            loaded_annotation_counts[token] = box_count
+
+        initialize_seed(training_seed, mode=baseline.reproducibility_mode)
+        model = create_detection_model(
+            baseline.model,
+            datasets["train"].model_label_to_source_id,
+        )
+        if model.pretrained_weights != "COCO_V1":
+            raise ValueError(f"{strategy} did not initialize from COCO_V1")
+        output_classes = model.detector.roi_heads.box_predictor.cls_score.out_features
+        if output_classes != 11:
+            raise ValueError(f"{strategy} model has {output_classes} outputs; expected 11")
+        fingerprint = _model_fingerprint(model)
+        if initial_model_fingerprint is None:
+            initial_model_fingerprint = fingerprint
+        elif fingerprint != initial_model_fingerprint:
+            raise ValueError(f"{strategy} model initialization differs within the seed block")
+        del model
+        gc.collect()
+
+        condition_results.append({
+            "strategy": strategy,
+            "selection_seed": selection_seed,
+            "training_seed": training_seed,
+            "child_manifest_sha256": condition["manifest_sha256"],
+            "selected_tokens": list(loaded_tokens),
+            "selected_image_count": len(loaded_tokens),
+            "selected_annotation_count": sum(loaded_annotation_counts.values()),
+            "per_scene_sample_counts": condition["per_scene_sample_counts"],
+            "validation_sample_count": len(actual_validation_tokens),
+            "validation_tokens_sha256": _token_digest(actual_validation_tokens),
+            "loaded_annotation_counts": loaded_annotation_counts,
+        })
+
+    if len(set(validation_tokens_by_strategy.values())) != 1:
+        raise ValueError("The validation token order differs between strategies")
+    control_payload = {
+        key: value
+        for key, value in baseline.to_dict().items()
+        if key not in {"training_sample_tokens_file", "curation_provenance"}
+    }
+    return {
+        "selection_seed": selection_seed,
+        "training_seed": training_seed,
+        "curation_directory": str(curation_path),
+        "run_manifest_sha256": curation["run_manifest_sha256"],
+        "split_manifest_digest": split_manifest["manifest_digest"],
+        "image_inventory_digest": split_manifest["inventory_digest"],
+        "validation_tokens_sha256": _token_digest(validation_tokens),
+        "pretrained_checkpoint_provenance": checkpoint_provenance,
+        "initial_model_state_sha256": initial_model_fingerprint,
+        "controls_sha256": hashlib.sha256(
+            json.dumps(control_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "test_dataset_instantiated": False,
+        "model_constructed": True,
+        "conditions": condition_results,
+    }
 
 
 def run_curation_pilot(
     *,
     baseline_config_path: Path,
-    curation_dir: Path,
+    curation_dir: Path | None = None,
     output_root: Path,
-    report_path: Path,
+    report_path: Path | None = None,
+    selection_seed: int = PILOT_SEED,
+    training_seed: int | None = None,
     repository_root: Path | None = None,
 ) -> Path:
-    """Validate all pilot inputs, then run each fresh experiment sequentially."""
+    """Validate seed-specific curation inputs, then run each experiment sequentially."""
     root = Path(repository_root or Path(__file__).resolve().parents[3]).resolve()
     baseline_path = _resolve_from_root(baseline_config_path, root)
+    if selection_seed not in APPROVED_SEEDS:
+        raise ValueError(f"selection_seed must be one of {APPROVED_SEEDS}")
+    training_seed = selection_seed if training_seed is None else training_seed
+    if training_seed not in APPROVED_SEEDS:
+        raise ValueError(f"training_seed must be one of {APPROVED_SEEDS}")
+    if training_seed != selection_seed:
+        raise ValueError(
+            "The approved seed-block design requires training_seed to equal selection_seed"
+        )
+    if curation_dir is None:
+        if selection_seed != PILOT_SEED:
+            raise ValueError(
+                "A seed-specific --curation-dir is required when selection_seed is not 42"
+            )
+        curation_dir = AUDITED_CURATION_DIR
     curation_dir = Path(curation_dir)
     if not curation_dir.is_absolute():
         curation_dir = root / curation_dir
@@ -68,13 +259,6 @@ def run_curation_pilot(
     if not output_root.is_absolute():
         output_root = root / output_root
     output_root = output_root.resolve()
-    report_path = Path(report_path)
-    if not report_path.is_absolute():
-        report_path = root / report_path
-    report_path = report_path.resolve()
-
-    if report_path.exists():
-        raise FileExistsError(f"Refusing to overwrite pilot report: {report_path}")
     if _is_relative_to(curation_dir, output_root) or _is_relative_to(output_root, curation_dir):
         raise ValueError("Pilot outputs must be isolated from the audited curation artifacts")
 
@@ -84,8 +268,11 @@ def run_curation_pilot(
         dataset_root=_resolve_from_root(baseline.dataset_root, root),
         vision_dir=_resolve_from_root(baseline.vision_dir, root),
         split_manifest=_resolve_from_root(baseline.split_manifest, root),
+        seed=training_seed,
+        selection_seed=selection_seed,
+        training_seed=training_seed,
     )
-    _validate_baseline_config(baseline)
+    _validate_baseline_config(baseline, training_seed=training_seed)
     if not torch.cuda.is_available():
         raise RuntimeError("The approved pilot requires CUDA; no CPU fallback is permitted")
 
@@ -93,12 +280,22 @@ def run_curation_pilot(
         curation_dir=curation_dir,
         config=baseline,
         repository_root=root,
+        selection_seed=selection_seed,
     )
     weight_provenance = pretrained_checkpoint_provenance(baseline.model)
     if weight_provenance is None:
         raise ValueError("The pilot requires the pretrained COCO_V1 checkpoint")
 
+    if report_path is not None:
+        report_path = Path(report_path)
+        if not report_path.is_absolute():
+            report_path = root / report_path
+        report_path = report_path.resolve()
+        if report_path.exists():
+            raise FileExistsError(f"Refusing to overwrite pilot report: {report_path}")
     run_root = _create_unique_run_root(output_root)
+    if report_path is None:
+        report_path = run_root / "pilot_report.md"
     condition_runs: list[dict[str, Any]] = []
     experiments: list[tuple[str, DetectionExperiment, dict[str, Any]]] = []
     validation_tokens: tuple[str, ...] | None = None
@@ -110,7 +307,13 @@ def run_curation_pilot(
         curation_provenance = {
             "strategy": strategy,
             "budget": PILOT_BUDGET,
-            "seed": PILOT_SEED,
+            "selection_seed": selection_seed,
+            "training_seed": training_seed,
+            "seed": selection_seed,
+            "selection_randomness": (
+                "randomized_subset" if strategy == "random"
+                else "deterministic_ranking_for_fixed_training_inputs"
+            ),
             "selected_sample_tokens": condition["selected_sample_tokens"],
             "selected_scene_tokens": condition["selected_scene_tokens"],
             "per_scene_sample_counts": condition["per_scene_sample_counts"],
@@ -129,6 +332,8 @@ def run_curation_pilot(
             training_sample_tokens_file=condition["selected_tokens_path"],
             training_sample_limit=None,
             validation_sample_limit=None,
+            selection_seed=selection_seed,
+            training_seed=training_seed,
             curation_provenance=curation_provenance,
             pretrained_checkpoint_provenance=weight_provenance,
         )
@@ -180,13 +385,18 @@ def run_curation_pilot(
             "selected_annotation_count": condition["loaded_box_count"],
             "class_counts": condition["class_counts"],
             "curation_child_manifest_sha256": condition["manifest_sha256"],
+            "selection_seed": selection_seed,
+            "training_seed": training_seed,
+            "selection_randomness": curation_provenance["selection_randomness"],
         })
 
     model_fingerprint: str | None = None
     for strategy, experiment, _ in experiments:
-        if pretrained_checkpoint_provenance(experiment.config.model) != weight_provenance:
-            raise ValueError("Cached pretrained checkpoint changed during preflight")
-        initialize_seed(PILOT_SEED, mode=baseline.reproducibility_mode)
+        _verify_pretrained_checkpoint_provenance(
+            pretrained_checkpoint_provenance(experiment.config.model),
+            weight_provenance,
+        )
+        initialize_seed(training_seed, mode=baseline.reproducibility_mode)
         model = create_detection_model(
             experiment.config.model,
             experiment.model_label_to_source_id,
@@ -212,6 +422,8 @@ def run_curation_pilot(
         "training_status": "running",
         "preflight_passed": True,
         "test_evaluated": False,
+        "selection_seed": selection_seed,
+        "training_seed": training_seed,
         "configuration": baseline.to_dict(),
         "pretrained_checkpoint_provenance": weight_provenance,
         "initial_model_state_sha256": model_fingerprint,
@@ -225,9 +437,11 @@ def run_curation_pilot(
         run_record = condition_runs[index]
         model: torch.nn.Module | None = None
         try:
-            if pretrained_checkpoint_provenance(experiment.config.model) != weight_provenance:
-                raise ValueError("Cached pretrained checkpoint changed before model construction")
-            initialize_seed(PILOT_SEED, mode=baseline.reproducibility_mode)
+            _verify_pretrained_checkpoint_provenance(
+                pretrained_checkpoint_provenance(experiment.config.model),
+                weight_provenance,
+            )
+            initialize_seed(training_seed, mode=baseline.reproducibility_mode)
             model = experiment.create_model()
             if _model_fingerprint(model) != model_fingerprint:
                 raise ValueError(f"{strategy} actual model initialization changed after preflight")
@@ -283,11 +497,15 @@ def run_curation_pilot(
     return run_root
 
 
-def _validate_baseline_config(config: ExperimentConfig) -> None:
+def _validate_baseline_config(
+    config: ExperimentConfig,
+    *,
+    training_seed: int = PILOT_SEED,
+) -> None:
     expected = {
         "batch_size": 1,
         "num_workers": 0,
-        "seed": PILOT_SEED,
+        "seed": training_seed,
         "epochs": 6,
         "learning_rate": 0.0001,
         "weight_decay": 0.0001,
@@ -324,14 +542,41 @@ def _validate_curation_inputs(
     curation_dir: Path,
     config: ExperimentConfig,
     repository_root: Path,
+    selection_seed: int = PILOT_SEED,
 ) -> dict[str, Any]:
     run_manifest_path = curation_dir / "experiment_manifest.json"
     run_manifest_sha256 = _sha256_file(run_manifest_path)
-    if run_manifest_sha256 != AUDITED_RUN_SHA256:
-        raise ValueError("Run-level curation manifest hash differs from the independent audit")
     run_manifest = _read_json_object(run_manifest_path)
-    if run_manifest.get("train_sample_count") != 242 or run_manifest.get("test_evaluated") is not False:
+    is_original_audited_bundle = (
+        selection_seed == PILOT_SEED
+        and curation_dir.resolve()
+        == (repository_root / AUDITED_CURATION_DIR).resolve()
+    )
+    if is_original_audited_bundle and run_manifest_sha256 != AUDITED_RUN_SHA256:
+        raise ValueError("Run-level curation manifest hash differs from the independent audit")
+    if (
+        run_manifest.get("seed") != selection_seed
+        or run_manifest.get("selection_seed", run_manifest.get("seed")) != selection_seed
+        or run_manifest.get("training_seed", run_manifest.get("seed")) != selection_seed
+        or run_manifest.get("train_sample_count") != 242
+        or run_manifest.get("test_evaluated") is not False
+    ):
         raise ValueError("Curation run manifest does not describe the approved train-only artifact")
+    if run_manifest.get("dataset_version") != load_dataset_version(
+        config.vision_dir / "dataset_manifest.json"
+    ):
+        raise ValueError("Curation parent-run dataset version differs from the active dataset")
+    child_manifest_names = run_manifest.get("subset_manifests")
+    if not isinstance(child_manifest_names, list) or not all(
+        isinstance(name, str) for name in child_manifest_names
+    ):
+        raise ValueError("Curation run manifest is missing child-manifest provenance")
+    expected_child_names = {
+        f"{strategy}_n{PILOT_BUDGET}_seed{selection_seed}_manifest.json"
+        for strategy in AUDITED_CHILD_SHA256
+    }
+    if not expected_child_names.issubset(set(child_manifest_names)):
+        raise ValueError("Curation run manifest does not list all four required child manifests")
 
     split_path = config.split_manifest
     vision_dir = config.vision_dir
@@ -384,25 +629,59 @@ def _validate_curation_inputs(
         token = row.get("sample_token", "")
         if token in train_tokens and row.get("conversion_status") == "accepted":
             annotations_by_sample[token] += 1
+    expected_source_hashes = run_manifest.get("source_hashes", expected_source_hashes)
+    if not isinstance(expected_source_hashes, dict):
+        raise ValueError("Curation run manifest source hashes must be an object")
+    training_scenes = {
+        image_by_sample[token]["scene_token"] for token in train_tokens
+    }
+    expected_quotas = balanced_scene_quotas(
+        dict(Counter(image_by_sample[token]["scene_token"] for token in train_tokens)),
+        PILOT_BUDGET,
+    )
+    if set(expected_quotas.values()) != {10}:
+        raise ValueError("Authoritative training scenes do not support the approved 10-per-scene quota")
     conditions: dict[str, Any] = {}
-    for strategy, expected_digest in AUDITED_CHILD_SHA256.items():
-        stem = f"{strategy}_n60_seed42"
+    for strategy in AUDITED_CHILD_SHA256:
+        stem = f"{strategy}_n{PILOT_BUDGET}_seed{selection_seed}"
         manifest_path = curation_dir / f"{stem}_manifest.json"
         selected_tokens_path = curation_dir / f"{stem}_selected.json"
+        if not manifest_path.is_file() or not selected_tokens_path.is_file():
+            raise FileNotFoundError(f"Missing seed-{selection_seed} manifest for {strategy}")
         manifest = _read_json_object(manifest_path)
         actual_digest = _canonical_manifest_digest(manifest)
-        if actual_digest != manifest.get("manifest_sha256") or actual_digest != expected_digest:
-            raise ValueError(f"{strategy} child manifest hash does not match the independent audit")
+        known_audited_digest = (
+            AUDITED_CHILD_SHA256[strategy]
+            if is_original_audited_bundle
+            else None
+        )
+        if (
+            actual_digest != manifest.get("manifest_sha256")
+            or (
+                known_audited_digest is not None
+                and actual_digest != known_audited_digest
+            )
+        ):
+            raise ValueError(f"{strategy} child manifest hash is invalid")
         if (
             manifest.get("selection_strategy") != strategy
             or manifest.get("budget") != PILOT_BUDGET
             or manifest.get("selected_count") != PILOT_BUDGET
-            or manifest.get("seed") != PILOT_SEED
+            or manifest.get("seed") != selection_seed
+            or manifest.get("selection_seed", manifest.get("seed")) != selection_seed
+            or manifest.get("training_seed", manifest.get("seed")) != selection_seed
             or manifest.get("dataset_version") != dataset_version
+            or manifest.get("dataset_source_id") != run_manifest.get("dataset_source_id")
             or manifest.get("split_manifest_digest") != split_manifest["manifest_digest"]
+            or manifest.get("scoring_configuration") != run_manifest.get(
+                "scoring_configuration"
+            )
             or manifest.get("requested_count_satisfied") is not True
+            or manifest.get("scene_quota_policy") != SCENE_QUOTA_POLICY
         ):
             raise ValueError(f"{strategy} child manifest does not match the approved condition")
+        if manifest.get("scene_quota_policy") != run_manifest.get("scene_quota_policy"):
+            raise ValueError(f"{strategy} parent-run quota policy mismatch")
         for key, expected_hash in expected_source_hashes.items():
             if manifest.get(key) != expected_hash:
                 raise ValueError(f"{strategy} child manifest source hash mismatch: {key}")
@@ -410,6 +689,7 @@ def _validate_curation_inputs(
         if (
             not isinstance(selected_tokens, list)
             or len(selected_tokens) != PILOT_BUDGET
+            or not all(isinstance(token, str) and token for token in selected_tokens)
             or len(set(selected_tokens)) != PILOT_BUDGET
         ):
             raise ValueError(f"{strategy} does not select exactly 60 unique sample tokens")
@@ -424,25 +704,42 @@ def _validate_curation_inputs(
         )
         if set(selected_tokens) & (validation_tokens | test_tokens):
             raise ValueError(f"{strategy} selection contains held-out sample tokens")
-        if manifest.get("scene_quota_policy") != SCENE_QUOTA_POLICY:
-            raise ValueError(f"{strategy} uses a different scene-quota policy")
+        if manifest.get("training_scenario_digest_sha256") != run_manifest.get(
+            "training_scenario_digest_sha256"
+        ):
+            raise ValueError(f"{strategy} parent-run scenario provenance mismatch")
         per_scene = manifest.get("per_scene_sample_counts")
         scene_quotas = manifest.get("scene_quotas")
+        if not isinstance(per_scene, dict) or not isinstance(scene_quotas, dict):
+            raise ValueError(f"{strategy} is missing scene-quota assignments")
         actual_scene_counts = dict(sorted(Counter(
             image_by_sample[token]["scene_token"] for token in selected_tokens
         ).items()))
         if (
             per_scene != actual_scene_counts
             or per_scene != scene_quotas
-            or set(per_scene.values()) != {10}
+            or per_scene != expected_quotas
+            or scene_quotas != expected_quotas
+            or set(per_scene) != training_scenes
+            or manifest.get("selected_scene_tokens")
+            != sorted({image_by_sample[token]["scene_token"] for token in selected_tokens})
         ):
-            raise ValueError(f"{strategy} does not satisfy the audited common scene quotas")
+            raise ValueError(f"{strategy} does not satisfy the approved common scene quotas")
         annotation_counts = manifest.get("selected_annotation_counts")
         if not isinstance(annotation_counts, dict):
             raise ValueError(f"{strategy} is missing annotation-count provenance")
         for token in selected_tokens:
             if token not in image_by_sample:
                 raise ValueError(f"{strategy} contains an unknown sample token: {token}")
+            image_path = (
+                config.dataset_root / image_by_sample[token]["image_path"]
+            ).resolve()
+            if not _is_relative_to(image_path, config.dataset_root.resolve()):
+                raise ValueError(f"{strategy} image path escapes the dataset root: {token}")
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Selected image file is missing for {token}: {image_path}")
+            if image_by_sample[token].get("scene_token") not in training_scenes:
+                raise ValueError(f"{strategy} has an invalid training-scene assignment: {token}")
             if int(image_by_sample[token]["annotation_count"]) != annotations_by_sample[token]:
                 raise ValueError(f"Training annotation inventory mismatch for {token}")
             if annotation_counts.get(token) != annotations_by_sample[token]:
@@ -461,6 +758,7 @@ def _validate_curation_inputs(
                 key: manifest[key]
                 for key in sorted(expected_source_hashes)
             },
+            "selection_seed": selection_seed,
         }
     return {
         "run_manifest_path": run_manifest_path.resolve(),
@@ -482,7 +780,8 @@ def _write_pilot_report(path: Path, status: dict[str, Any]) -> None:
         "",
         "Compare four train-only, scene-balanced 60-image subsets using the same "
         "Faster R-CNN MobileNetV3 Large 320 FPN architecture, COCO_V1 initialization, "
-        "seed 42, six epochs, batch size 1, AdamW, StepLR, AMP, preprocessing, and the "
+        f"selection/training seed {status.get('selection_seed', PILOT_SEED)}, six epochs, "
+        "batch size 1, AdamW, StepLR, AMP, preprocessing, and the "
         "same 80-image validation partition. This single-seed feasibility pilot does "
         "not establish statistical significance or general improvement.",
         "",
@@ -496,7 +795,7 @@ def _write_pilot_report(path: Path, status: dict[str, Any]) -> None:
         f"- Initial model-state SHA-256: `{status.get('initial_model_state_sha256', 'not recorded')}`",
         "- Each completed checkpoint contains curation child/run-manifest hashes and the pretrained checkpoint hash in metadata.",
         f"- Unique non-overwriting run directory: `{status.get('run_directory', 'not recorded')}`",
-        "- Reproduction command: `python -m scenarioforge.training.cli curation-pilot` (defaults to the audited manifests and Part 3D.3 baseline config).",
+        "- Reproduction command requires the matching `--selection-seed` and explicit `--curation-dir` for non-42 manifests.",
         "",
         "## Results",
         "",
@@ -653,6 +952,20 @@ def _canonical_manifest_digest(manifest: dict[str, Any]) -> str:
         ensure_ascii=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _token_digest(tokens: tuple[str, ...]) -> str:
+    return hashlib.sha256(
+        json.dumps(list(tokens), separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _verify_pretrained_checkpoint_provenance(
+    actual: dict[str, str] | None,
+    expected: dict[str, str] | None,
+) -> None:
+    if expected is None or actual != expected:
+        raise ValueError("Cached pretrained checkpoint provenance differs between conditions")
 
 
 def _model_fingerprint(model: torch.nn.Module) -> str:

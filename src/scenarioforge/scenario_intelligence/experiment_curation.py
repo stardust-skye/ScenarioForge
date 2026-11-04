@@ -310,6 +310,7 @@ def create_experiment_subsets(
     dataset_root: Path,
     output_root: Path,
     seed: int = 42,
+    training_seed: int | None = None,
     reduced_budgets: Sequence[int] = DEFAULT_REDUCED_BUDGETS,
 ) -> Path:
     """Validate train-only inputs and create immutable curation subset artifacts."""
@@ -319,6 +320,15 @@ def create_experiment_subsets(
     scenario_path = Path(scenario_path)
     split_manifest_path = Path(split_manifest_path)
     dataset_root = Path(dataset_root)
+    training_seed = seed if training_seed is None else training_seed
+    if not isinstance(seed, int) or seed < 0:
+        raise ValueError("selection seed must be a non-negative integer")
+    if not isinstance(training_seed, int) or training_seed < 0:
+        raise ValueError("training seed must be a non-negative integer")
+    if training_seed != seed:
+        raise ValueError(
+            "The approved multi-seed experiment requires training_seed to equal selection seed"
+        )
     image_path = vision_dir / "image_manifest.csv"
     annotation_path = vision_dir / "annotations.csv"
     category_mapping_path = vision_dir / "category_mapping.json"
@@ -420,6 +430,8 @@ def create_experiment_subsets(
         **source_hashes,
         "training_scenario_digest_sha256": input_digest(train_records),
         "seed": seed,
+        "selection_seed": seed,
+        "training_seed": training_seed,
         "created_at_utc": timestamp,
         "scene_quota_policy": SCENE_QUOTA_POLICY,
         "scoring_configuration": {

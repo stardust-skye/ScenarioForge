@@ -135,6 +135,16 @@ class DetectionExperiment:
             "model_label_to_source_id": self.model_label_to_source_id,
             "training_selection": self.selection_audit,
             "seed": config.seed,
+            "selection_seed": (
+                config.selection_seed
+                if config.selection_seed is not None
+                else config.seed
+            ),
+            "training_seed": (
+                config.training_seed
+                if config.training_seed is not None
+                else config.seed
+            ),
             "reproducibility_mode": config.reproducibility_mode,
         }
         if config.curation_provenance is not None:

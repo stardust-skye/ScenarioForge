@@ -64,9 +64,7 @@ class ExperimentConfig:
             if value is not None and (not isinstance(value, int) or value < 0):
                 raise ValueError(f"{field_name} must be a non-negative integer")
         if self.training_seed is not None and self.training_seed != self.seed:
-            if self.seed != 42:
-                raise ValueError("seed and training_seed must match when both are specified")
-            object.__setattr__(self, "seed", self.training_seed)
+            raise ValueError("seed and training_seed must match when both are specified")
         if self.training_sample_tokens_file is not None:
             object.__setattr__(
                 self, "training_sample_tokens_file", Path(self.training_sample_tokens_file)

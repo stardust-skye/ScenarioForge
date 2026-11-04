@@ -680,6 +680,9 @@ def test_experiment_records_split_inventory_and_selection_digests(tmp_path):
         vision_dir=vision_dir,
         split_manifest=split_path,
         output_dir=tmp_path / "experiments",
+        seed=123,
+        selection_seed=123,
+        training_seed=123,
         training_sample_limit=1,
         validation_sample_limit=1,
         model=ModelConfig(pretrained_weights=None),
@@ -699,6 +702,8 @@ def test_experiment_records_split_inventory_and_selection_digests(tmp_path):
     )
     assert saved_environment["split_manifest_digest"] == manifest["manifest_digest"]
     assert saved_environment["image_inventory_digest"] == manifest["inventory_digest"]
+    assert saved_environment["selection_seed"] == 123
+    assert saved_environment["training_seed"] == 123
     assert saved_environment["training_selection"]["heldout_samples_unchanged"]
     assert saved_environment["training_selection"]["selection_digest"] == (
         experiment.selection_audit["selection_digest"]

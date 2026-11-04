@@ -97,6 +97,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parent for a new immutable run directory (default: data/processed/curation_experiments)",
     )
     experiment_curate.add_argument("--seed", type=int, default=42)
+    experiment_curate.add_argument(
+        "--training-seed",
+        type=int,
+        help="Training RNG seed recorded separately; defaults to --seed",
+    )
+    experiment_curate.add_argument(
+        "--budget",
+        type=int,
+        action="append",
+        dest="budgets",
+        help="Reduced subset budget to generate; repeat as needed (default: 60, 120, 180)",
+    )
 
     cmp_ = sub.add_parser("compare", help="Compare original vs curated distributions from a manifest")
     cmp_.add_argument("--manifest", type=Path, required=True)
@@ -168,6 +180,8 @@ def run(args: argparse.Namespace) -> int:
             dataset_root=dataset_root,
             output_root=output_root,
             seed=args.seed,
+            training_seed=args.training_seed,
+            reduced_budgets=tuple(args.budgets) if args.budgets else (60, 120, 180),
         )
         logger.info("Created immutable train-only curation subsets in %s", run_dir)
         return 0

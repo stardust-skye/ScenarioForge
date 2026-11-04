@@ -7,6 +7,7 @@ from PIL import Image
 
 from scenarioforge.scenario_intelligence.experiment_curation import (
     balanced_scene_quotas,
+    create_experiment_subsets,
     select_train_records,
     sha256_file,
     validate_training_scenarios,
@@ -310,6 +311,19 @@ def test_balanced_scene_quotas_respect_capacity_and_fail_when_impossible():
     }
     with pytest.raises(ValueError, match="impossible"):
         balanced_scene_quotas({"a": 2, "b": 1}, 4)
+
+
+def test_experiment_generation_rejects_mismatched_selection_and_training_seeds(tmp_path):
+    with pytest.raises(ValueError, match="training_seed to equal selection seed"):
+        create_experiment_subsets(
+            scenario_path=tmp_path / "scenarios.json",
+            vision_dir=tmp_path / "vision",
+            split_manifest_path=tmp_path / "split.json",
+            dataset_root=tmp_path / "dataset",
+            output_root=tmp_path / "output",
+            seed=123,
+            training_seed=42,
+        )
 
 
 def test_changed_inventory_and_file_contents_change_provenance(curation_inputs, tmp_path):

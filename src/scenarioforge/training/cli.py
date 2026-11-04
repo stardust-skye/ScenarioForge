@@ -51,10 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
     pilot.add_argument(
         "--curation-dir",
         type=Path,
-        default=Path(
-            "data/processed/curation_experiments/"
-            "curation_20261103T205532Z_77d0c39b"
-        ),
+        help="Directory containing the verified parent and seed-specific child manifests",
+    )
+    pilot.add_argument(
+        "--selection-seed",
+        type=int,
+        choices=(42, 123, 2027, 31415, 271828),
+        default=42,
+        help="Approved seed recorded by the curation manifests",
+    )
+    pilot.add_argument(
+        "--training-seed",
+        type=int,
+        choices=(42, 123, 2027, 31415, 271828),
+        help="Model-training seed; defaults to --selection-seed for the approved design",
     )
     pilot.add_argument(
         "--output-root",
@@ -64,7 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
     pilot.add_argument(
         "--report-path",
         type=Path,
-        default=Path("docs/PART_3F_4_CONTROLLED_PILOT_REPORT.md"),
+        help="Optional report path; by default the report is written inside the unique run directory",
+    )
+    pilot.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Validate manifests, datasets, and fresh model initialization without training",
     )
     return parser
 
@@ -77,13 +92,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         ), indent=2, sort_keys=True))
         return 0
     if args.command == "curation-pilot":
-        from scenarioforge.training.curation_pilot import run_curation_pilot
+        from scenarioforge.training.curation_pilot import (
+            preflight_curation_pilot,
+            run_curation_pilot,
+        )
 
+        if args.preflight_only:
+            if args.report_path is not None:
+                raise ValueError("--report-path cannot be used with --preflight-only")
+            result = preflight_curation_pilot(
+                baseline_config_path=args.baseline_config,
+                curation_dir=args.curation_dir,
+                selection_seed=args.selection_seed,
+                training_seed=args.training_seed,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
         run_root = run_curation_pilot(
             baseline_config_path=args.baseline_config,
             curation_dir=args.curation_dir,
             output_root=args.output_root,
             report_path=args.report_path,
+            selection_seed=args.selection_seed,
+            training_seed=args.training_seed,
         )
         print(f"Completed Part 3F.4 curation pilot in {run_root}")
         return 0
